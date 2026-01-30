@@ -1,0 +1,386 @@
+/*
+ * Car Relay Controller - ESP32-C3
+ * Controls a relay via BLE for remote start module power management
+ * 
+ * Features:
+ * - BLE control from web app
+ * - Auto-shutoff timer after ignition off
+ * - Manual button override
+ * - Status LED
+ * - Light sleep mode for battery preservation
+ * - Ignition sensing
+ */
+
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <Preferences.h>
+
+// Pin Definitions (for Seeed XIAO ESP32C3)
+// XIAO pinout: D2=GPIO4, D3=GPIO5, D4=GPIO6, D8=GPIO8
+#define RELAY_PIN 5        // GPIO5 (D3 on XIAO) - Controls relay
+#define IGNITION_PIN 4     // GPIO4 (D2 on XIAO) - Senses ignition (via voltage divider)
+#define BUTTON_PIN 6       // GPIO6 (D4 on XIAO) - Manual override button
+#define LED_PIN 8          // GPIO8 (D8 on XIAO) - Status LED
+
+// BLE UUIDs - Must match web app
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+// Default Settings (TEMPORARY - Set to 1 min for testing)
+#define DEFAULT_AUTO_SHUTOFF 1   // minutes - TESTING (normally 30)
+#define DEFAULT_SLEEP_DELAY 5     // minutes
+
+// State Variables
+bool relayState = false;
+bool ignitionState = false;
+bool isLocked = false;
+unsigned long ignitionOffTime = 0;
+unsigned long lastBLEDisconnect = 0;
+int autoShutoffMinutes = DEFAULT_AUTO_SHUTOFF;
+int sleepDelayMinutes = DEFAULT_SLEEP_DELAY;
+bool deviceConnected = false;
+bool lastButtonState = HIGH;
+
+// BLE Objects
+BLEServer *pServer = NULL;
+BLECharacteristic *pCharacteristic = NULL;
+Preferences preferences;
+
+// Forward function declarations
+void sendStatus();
+void sendResponse(String message);
+void handleCommand(String command);
+void setRelay(bool state);
+
+// BLE Server Callbacks
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      Serial.println("BLE Client Connected");
+      sendStatus();
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      lastBLEDisconnect = millis();
+      Serial.println("BLE Client Disconnected");
+      
+      // Restart advertising
+      BLEDevice::startAdvertising();
+      Serial.println("Restarting advertising...");
+    }
+};
+
+// BLE Characteristic Callbacks
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      String value = String(pCharacteristic->getValue().c_str());
+      
+      if (value.length() > 0) {
+        Serial.println("Received: " + value);
+        handleCommand(value);
+      }
+    }
+};
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Car Relay Controller Starting...");
+
+  // Initialize pins
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(IGNITION_PIN, INPUT);
+  
+  // Initialize relay to OFF (fail-safe)
+  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(LED_PIN, LOW);
+
+  // Load saved preferences
+  preferences.begin("relay-config", false);
+  autoShutoffMinutes = preferences.getInt("shutoff", DEFAULT_AUTO_SHUTOFF);
+  sleepDelayMinutes = preferences.getInt("sleep", DEFAULT_SLEEP_DELAY);
+  relayState = preferences.getBool("relayState", false);
+  preferences.end();
+
+  // Restore relay state
+  digitalWrite(RELAY_PIN, relayState ? HIGH : LOW);
+  digitalWrite(LED_PIN, relayState ? HIGH : LOW);
+
+  // Initialize BLE
+  initBLE();
+
+  Serial.println("Setup complete. Ready for connections.");
+}
+
+void loop() {
+  // Check ignition state
+  checkIgnition();
+  
+  // Check manual button
+  checkButton();
+  
+  // Handle auto-shutoff timer
+  handleAutoShutoff();
+  
+  // Handle sleep after BLE disconnect
+  handleSleepTimer();
+  
+  // Update LED based on relay state
+  digitalWrite(LED_PIN, relayState ? HIGH : LOW);
+  
+  delay(100); // Small delay for stability
+}
+
+void initBLE() {
+  // Create BLE Device
+  BLEDevice::init("CarRelay");
+  
+  // Create BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  // Create BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Create BLE Characteristic
+  pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ |
+    BLECharacteristic::PROPERTY_WRITE |
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+
+  pCharacteristic->setCallbacks(new MyCallbacks());
+  pCharacteristic->addDescriptor(new BLE2902());
+
+  // Start service
+  pService->start();
+
+  // Start advertising
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
+  
+  Serial.println("BLE Advertising started. Device name: CarRelay");
+}
+
+void handleCommand(String command) {
+  if (command == "RELAY_ON") {
+    if (!isLocked) {
+      setRelay(true);
+      sendStatus();
+    }
+  }
+  else if (command == "RELAY_OFF") {
+    if (!isLocked) {
+      setRelay(false);
+      sendStatus();
+    }
+  }
+  else if (command == "RELAY_TOGGLE") {
+    if (!isLocked) {
+      setRelay(!relayState);
+      sendStatus();
+    }
+  }
+  else if (command == "GET_STATUS") {
+    sendStatus();
+  }
+  else if (command.startsWith("SET_TIMER:")) {
+    int minutes = command.substring(10).toInt();
+    if (minutes >= 1 && minutes <= 240) {  // Allow 1-240 minutes for testing
+      autoShutoffMinutes = minutes;
+      preferences.begin("relay-config", false);
+      preferences.putInt("shutoff", autoShutoffMinutes);
+      preferences.end();
+      sendResponse("TIMER_SET:" + String(autoShutoffMinutes));
+      Serial.println("Auto-shutoff timer set to " + String(autoShutoffMinutes) + " minutes");
+    }
+  }
+  else if (command.startsWith("SET_SLEEP:")) {
+    int minutes = command.substring(10).toInt();
+    if (minutes >= 1 && minutes <= 30) {
+      sleepDelayMinutes = minutes;
+      preferences.begin("relay-config", false);
+      preferences.putInt("sleep", sleepDelayMinutes);
+      preferences.end();
+      sendResponse("SLEEP_SET:" + String(sleepDelayMinutes));
+      Serial.println("Sleep delay set to " + String(sleepDelayMinutes) + " minutes");
+    }
+  }
+  else if (command == "LOCK") {
+    isLocked = true;
+    sendResponse("LOCKED");
+  }
+  else if (command == "UNLOCK") {
+    isLocked = false;
+    sendResponse("UNLOCKED");
+  }
+  // TESTING COMMANDS - Remove before production
+  else if (command == "TEST_IGN_ON") {
+    ignitionState = true;
+    ignitionOffTime = 0;
+    setRelay(true);
+    sendResponse("TEST: Ignition simulated ON, relay activated, timer cleared");
+    Serial.println("TEST: Ignition manually set to ON");
+  }
+  else if (command == "TEST_IGN_OFF") {
+    ignitionState = false;
+    ignitionOffTime = millis();
+    sendResponse("TEST: Ignition simulated OFF, auto-shutoff timer started");
+    Serial.println("TEST: Ignition manually set to OFF, timer started (" + String(autoShutoffMinutes) + " min)");
+  }
+}
+
+void setRelay(bool state) {
+  relayState = state;
+  digitalWrite(RELAY_PIN, state ? HIGH : LOW);
+  
+  // Save state to preferences
+  preferences.begin("relay-config", false);
+  preferences.putBool("relayState", relayState);
+  preferences.end();
+  
+  Serial.println("Relay: " + String(state ? "ON" : "OFF"));
+}
+
+void sendStatus() {
+  String status = "RELAY_STATE:" + String(relayState ? "ON" : "OFF");
+  status += ",IGNITION:" + String(ignitionState ? "ON" : "OFF");
+  status += ",LOCKED:" + String(isLocked ? "YES" : "NO");
+  sendResponse(status);
+}
+
+void sendResponse(String message) {
+  if (deviceConnected) {
+    pCharacteristic->setValue(message.c_str());
+    pCharacteristic->notify();
+    Serial.println("Sent: " + message);
+  }
+}
+
+void checkIgnition() {
+  // Read ignition pin (will be ~2.4V when ignition is on, 0V when off)
+  // ADC reads 0-4095 for 0-3.3V range
+  // 2.4V ≈ 2979 on ADC
+  int adcValue = analogRead(IGNITION_PIN);
+  bool newIgnitionState = (adcValue > 2000); // Threshold for ignition detection
+  
+  if (newIgnitionState != ignitionState) {
+    ignitionState = newIgnitionState;
+    Serial.println("Ignition: " + String(ignitionState ? "ON" : "OFF"));
+    
+    if (ignitionState) {
+      // Ignition turned ON - turn relay on and clear timer
+      setRelay(true);
+      ignitionOffTime = 0;
+      Serial.println("Ignition ON - Relay activated, timer cleared");
+    } else {
+      // Ignition turned OFF - start auto-shutoff timer
+      ignitionOffTime = millis();
+      Serial.println("Ignition OFF - Auto-shutoff timer started (" + String(autoShutoffMinutes) + " min)");
+    }
+    
+    if (deviceConnected) {
+      sendStatus();
+    }
+  }
+}
+
+void handleAutoShutoff() {
+  // If ignition is off and timer is set
+  if (!ignitionState && ignitionOffTime > 0 && relayState) {
+    unsigned long elapsed = millis() - ignitionOffTime;
+    unsigned long shutoffTime = autoShutoffMinutes * 60000UL; // Convert to milliseconds
+    
+    if (elapsed >= shutoffTime) {
+      Serial.println("Auto-shutoff timer expired - turning relay OFF");
+      setRelay(false);
+      ignitionOffTime = 0;
+      
+      if (deviceConnected) {
+        sendStatus();
+      }
+    }
+  }
+}
+
+void handleSleepTimer() {
+  // If BLE disconnected and sleep delay has passed, enter light sleep
+  if (!deviceConnected && lastBLEDisconnect > 0) {
+    unsigned long elapsed = millis() - lastBLEDisconnect;
+    unsigned long sleepTime = sleepDelayMinutes * 60000UL;
+    
+    if (elapsed >= sleepTime) {
+      Serial.println("Entering light sleep mode...");
+      lastBLEDisconnect = 0;
+      
+      // Configure light sleep with BLE active
+      // ESP32-C3 will stay in light sleep but wake for BLE connections
+      esp_sleep_enable_timer_wakeup(10000000); // Wake every 10 seconds to check
+      
+      // Note: In light sleep, BLE stays active on ESP32-C3
+      // Power consumption: ~1-3mA instead of ~80-100mA
+      esp_light_sleep_start();
+      
+      Serial.println("Woke from light sleep");
+    }
+  }
+}
+
+void checkButton() {
+  bool buttonState = digitalRead(BUTTON_PIN);
+  
+  // Button pressed (goes LOW because of INPUT_PULLUP)
+  if (buttonState == LOW && lastButtonState == HIGH) {
+    delay(50); // Debounce
+    buttonState = digitalRead(BUTTON_PIN);
+    
+    if (buttonState == LOW && !isLocked) {
+      // Toggle relay
+      setRelay(!relayState);
+      Serial.println("Manual button pressed - Relay toggled");
+      
+      if (deviceConnected) {
+        sendStatus();
+      }
+      
+      // Brief LED flash to confirm
+      digitalWrite(LED_PIN, HIGH);
+      delay(200);
+      digitalWrite(LED_PIN, relayState ? HIGH : LOW);
+    }
+  }
+  
+  lastButtonState = buttonState;
+}
+
+/*
+ * INSTALLATION NOTES:
+ * 
+ * 1. Upload this code to ESP32-C3 via Arduino IDE
+ * 2. Open Serial Monitor to verify operation
+ * 3. Test BLE connection with web app before installing in car
+ * 4. Verify voltage divider gives ~2.4V when ignition is on (check with multimeter)
+ * 5. Test relay operation with multimeter before connecting to actual circuit
+ * 6. Mount in weatherproof enclosure
+ * 7. Route wires away from heat sources (exhaust, engine block)
+ * 
+ * TESTING CHECKLIST:
+ * □ BLE connects from phone
+ * □ Relay toggles via app
+ * □ Relay toggles via button
+ * □ LED indicates relay state
+ * □ Ignition sensing works (check serial monitor)
+ * □ Auto-shutoff timer works
+ * □ Timer settings save and persist after power cycle
+ * □ Lock mode prevents toggling
+ * □ Device reconnects after disconnect
+ */
