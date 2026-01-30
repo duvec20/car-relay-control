@@ -465,13 +465,25 @@
             const value = decoder.decode(event.target.value);
             console.log('Received:', value);
 
-            if (value.startsWith('RELAY_STATE:')) {
-                const state = value.includes('ON');
+            // Handle full status messages (RELAY_STATE:ON,IGNITION:OFF,LOCKED:NO)
+            if (value.includes('RELAY_STATE:')) {
+                const state = value.includes('RELAY_STATE:ON');
                 updateRelayDisplay(state);
-            } else if (value.startsWith('TIMER_SET:')) {
+                console.log('Updated relay state to:', state);
+            }
+            
+            // Handle timer confirmation
+            if (value.startsWith('TIMER_SET:')) {
                 const minutes = parseInt(value.split(':')[1]);
                 autoShutoffTimer = minutes;
                 document.getElementById('timerDisplay').textContent = minutes + ' min';
+            }
+            
+            // Handle sleep timer confirmation
+            if (value.startsWith('SLEEP_SET:')) {
+                const minutes = parseInt(value.split(':')[1]);
+                sleepTimer = minutes;
+                document.getElementById('sleepDisplay').textContent = minutes + ' min';
             }
         }
 
