@@ -341,7 +341,7 @@
             
             <div class="setting-item">
                 <label class="setting-label">
-                    Auto-shutoff Timer: <span class="setting-value" id="shutoffValue">30 minutes</span>
+                    Auto-shutoff Timer: <span class="setting-value" id="shutoffValue">1 minutes</span>
                 </label>
                 <input type="range" min="1" max="240" step="5" value="1" class="slider" id="shutoffSlider">
                 <div class="slider-range">
@@ -385,7 +385,7 @@
         let isConnected = false;
         let relayState = false;
         let isLocked = false;
-        let autoShutoffTimer = 30;
+        let autoShutoffTimer = 1;
         let sleepTimer = 5;
 
         // Initialize
