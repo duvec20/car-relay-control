@@ -468,8 +468,10 @@
             // Handle full status messages (RELAY_STATE:ON,IGNITION:OFF,LOCKED:NO)
             if (value.includes('RELAY_STATE:')) {
                 const state = value.includes('RELAY_STATE:ON');
+                console.log('Parsing state - found:', state ? 'ON' : 'OFF');
+                console.log('Current relayState before update:', relayState);
                 updateRelayDisplay(state);
-                console.log('Updated relay state to:', state);
+                console.log('Current relayState after update:', relayState);
             }
             
             // Handle timer confirmation
@@ -494,8 +496,11 @@
             }
 
             const command = relayState ? 'RELAY_OFF' : 'RELAY_ON';
+            console.log('Sending command:', command);
             await sendCommand(command);
-            updateRelayDisplay(!relayState);
+            
+            // Don't optimistically update - wait for notification
+            // The handleNotification function will update the UI
         }
 
         function updateRelayDisplay(state) {
