@@ -36,6 +36,7 @@
 bool relayState = false;
 bool ignitionState = false;
 bool isLocked = false;
+bool testMode = false;  // When true, ignore actual ignition pin readings
 unsigned long ignitionOffTime = 0;
 unsigned long lastBLEDisconnect = 0;
 int autoShutoffMinutes = DEFAULT_AUTO_SHUTOFF;
@@ -225,17 +226,24 @@ void handleCommand(String command) {
   }
   // TESTING COMMANDS - Remove before production
   else if (command == "TEST_IGN_ON") {
+    testMode = true;  // Enable test mode
     ignitionState = true;
     ignitionOffTime = 0;
     setRelay(true);
     sendResponse("TEST: Ignition simulated ON, relay activated, timer cleared");
-    Serial.println("TEST: Ignition manually set to ON");
+    Serial.println("TEST: Ignition manually set to ON (test mode enabled)");
   }
   else if (command == "TEST_IGN_OFF") {
+    testMode = true;  // Enable test mode
     ignitionState = false;
     ignitionOffTime = millis();
     sendResponse("TEST: Ignition simulated OFF, auto-shutoff timer started");
     Serial.println("TEST: Ignition manually set to OFF, timer started (" + String(autoShutoffMinutes) + " min)");
+  }
+  else if (command == "TEST_MODE_OFF") {
+    testMode = false;
+    sendResponse("TEST: Test mode disabled, normal ignition sensing resumed");
+    Serial.println("TEST: Test mode disabled");
   }
 }
 
@@ -255,6 +263,8 @@ void sendStatus() {
   String status = "RELAY_STATE:" + String(relayState ? "ON" : "OFF");
   status += ",IGNITION:" + String(ignitionState ? "ON" : "OFF");
   status += ",LOCKED:" + String(isLocked ? "YES" : "NO");
+  status += ",TIMER:" + String(autoShutoffMinutes);
+  status += ",SLEEP:" + String(sleepDelayMinutes);
   sendResponse(status);
 }
 
@@ -267,6 +277,11 @@ void sendResponse(String message) {
 }
 
 void checkIgnition() {
+  // Skip if in test mode (using manual test commands)
+  if (testMode) {
+    return;
+  }
+  
   // Read ignition pin (will be ~2.4V when ignition is on, 0V when off)
   // ADC reads 0-4095 for 0-3.3V range
   // 2.4V ≈ 2979 on ADC

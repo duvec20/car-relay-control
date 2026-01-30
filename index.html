@@ -486,7 +486,21 @@
                 updateRelayDisplay(state);
                 console.log('Current relayState after update:', relayState);
             }
-            
+            // Extract timer from status message
+            const timerMatch = value.match(/TIMER:(\d+)/);
+            if (timerMatch) {
+                autoShutoffTimer = parseInt(timerMatch[1]);
+                document.getElementById('timerDisplay').textContent = autoShutoffTimer + ' min';
+                console.log('Timer from status:', autoShutoffTimer);
+            }
+
+            // Extract sleep timer from status message
+            const sleepMatch = value.match(/SLEEP:(\d+)/);
+            if (sleepMatch) {
+                sleepTimer = parseInt(sleepMatch[1]);
+                document.getElementById('sleepDisplay').textContent = sleepTimer + ' min';
+                console.log('Sleep from status:', sleepTimer);
+            }
             // Handle timer confirmation
             if (value.startsWith('TIMER_SET:')) {
                 const minutes = parseInt(value.split(':')[1]);
